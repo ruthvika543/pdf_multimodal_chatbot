@@ -1,4 +1,6 @@
 import fitz
+import re
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 HEADING_MIN_SIZE = 14.0
 FOOTER_MAX_SIZE  = 9.5
@@ -6,7 +8,7 @@ NOISE_STRINGS    = {"fervi.com", "MACHINES AND", "ACCESSORIES"}
 
 
 def get_page_heading(page) -> str:
-    data = page.get_text("dict")
+    data       = page.get_text("dict")
     candidates = []
 
     for block in data["blocks"]:
@@ -19,50 +21,42 @@ def get_page_heading(page) -> str:
 
                 if not text:
                     continue
-                if size > 50:        # skip watermarks
+                if size > 50:
                     continue
-                if size <= 9.5:      # skip footers
+                if size <= FOOTER_MAX_SIZE:
                     continue
                 if text in NOISE_STRINGS:
                     continue
-
-                # YOUR FIX 1: skip spans shorter than 4 characters
                 if len(text) < 4:
                     continue
 
-                # Only collect heading-sized text
                 if size >= HEADING_MIN_SIZE:
-                    # Store y-position (block["bbox"][1]) so we can sort by position
                     y_pos = block["bbox"][1]
                     candidates.append((y_pos, size, text))
 
-    if not candidates:
-        return ""
+    # Strategy 1: font-size based
+    if candidates:
+        candidates.sort(key=lambda x: x[0])
+        return candidates[0][2]
 
-    # YOUR FIX 2: sort by y-position and take only the FIRST one
-    candidates.sort(key=lambda x: x[0])  # sort by y_pos
-    
-    # Return just the first heading found (topmost on page)
-    return candidates[0][2]   # [2] is the text
+    # Strategy 2: regex fallback for pages where all text is same size
+    # Matches "4.2.1 Supporting table" or "5 INSTALLATION" patterns
+    all_text = page.get_text("text", sort=True)
+    for line in all_text.split("\n"):
+        line = line.strip()
+        if re.match(r'^\d+(\.\d+)*\s+[A-Z]', line) and len(line) > 5:
+            return line
 
-def extract_text_from_page(page) -> tuple[str, str]:
-    """
-    Extracts clean text from a page.
-    Returns: (text, method) where method is "native" or "ocr"
+    return ""
 
-    WHY check character count?
-    Some pages are purely images (scanned) — get_text() returns
-    almost nothing. We detect this and flag it for OCR later.
-    We won't implement OCR today — just flag it.
-    """
+
+def extract_text_from_page(page) -> tuple:
     text = page.get_text("text", sort=True).strip()
 
-    # Remove known noise lines that appear on every page
     lines = text.split("\n")
     cleaned_lines = []
     for line in lines:
         stripped = line.strip()
-        # Skip noise: page numbers, repeated headers, empty lines
         if not stripped:
             continue
         if stripped in NOISE_STRINGS:
@@ -75,23 +69,13 @@ def extract_text_from_page(page) -> tuple[str, str]:
 
     clean_text = "\n".join(cleaned_lines)
 
-    # Flag pages with very little text — likely scanned images
     if len(clean_text) < 50:
         return clean_text, "needs_ocr"
 
     return clean_text, "native"
 
-from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-def chunk_text(text: str, page_num: int, heading: str) -> list[dict]:
-    """
-    Splits page text into overlapping chunks with metadata.
-
-    WHY 700 chars with 150 overlap?
-    700 chars ≈ 175 tokens — small enough to be specific,
-    big enough to hold a complete idea.
-    150 char overlap prevents losing meaning at boundaries.
-    """
+def chunk_text(text: str, page_num: int, heading: str) -> list:
     splitter = RecursiveCharacterTextSplitter(
         chunk_size    = 700,
         chunk_overlap = 150,
@@ -102,7 +86,6 @@ def chunk_text(text: str, page_num: int, heading: str) -> list[dict]:
     result = []
 
     for i, chunk in enumerate(raw_chunks):
-        # Tag safety-related chunks for better retrieval later
         tag = ""
         for keyword in ("WARNING", "CAUTION", "DANGER", "NOTE"):
             if chunk.upper().startswith(keyword):
@@ -122,31 +105,14 @@ def chunk_text(text: str, page_num: int, heading: str) -> list[dict]:
 
     return result
 
+
 if __name__ == "__main__":
     doc = fitz.open("data/doc2.pdf")
 
-    print("=== FULL PIPELINE — All 84 pages ===\n")
-    all_chunks = []
-
-    for i in range(doc.page_count):
+    print("=== HEADING TEST — First 20 pages ===\n")
+    for i in range(20):
         page    = doc[i]
         heading = get_page_heading(page)
-        text, method = extract_text_from_page(page)
-
-        if not text:
-            continue
-
-        chunks = chunk_text(text, page_num=i+1, heading=heading)
-        all_chunks.extend(chunks)
+        print(f"  Page {i+1:2d}: '{heading}'")
 
     doc.close()
-
-    print(f"Total chunks created: {len(all_chunks)}")
-    print(f"Total pages processed: 84")
-    print(f"Average chunks per page: {len(all_chunks)/84:.1f}")
-
-    print("\n--- Sample chunks ---")
-    for chunk in all_chunks[10:13]:
-        print(f"\nPage {chunk['page']} | section='{chunk['section'][:35]}' | chunk {chunk['chunk_idx']}")
-        print(f"chars={chunk['char_count']} | tag='{chunk['tag']}'")
-        print(f"text: '{chunk['text'][:150]}...'")
