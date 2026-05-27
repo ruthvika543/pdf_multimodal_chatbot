@@ -67,6 +67,10 @@ def extract_text_from_page(page) -> tuple:
             continue
         cleaned_lines.append(stripped)
 
+        # Skip TOC dot-leader lines
+        if re.match(r'^[\d\.\s]+.*\.{5,}', stripped):
+            continue
+
     clean_text = "\n".join(cleaned_lines)
 
     if len(clean_text) < 50:
